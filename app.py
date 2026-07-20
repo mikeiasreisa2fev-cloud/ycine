@@ -9,22 +9,23 @@ import time
 
 app = Flask(__name__)
 
-# ================= CONFIGURAÇÕES (VERSÃO 21.0) =================
-# MegaFlix
+# ================= CONFIGURAÇÕES (VERSÃO 23.0) =================
+# MegaFlix - Fontes
 MEGAFLIX_API = "https://app.megafrixapi.com/TV/1.2/"
 MEGAFLIX_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36",
     "Referer": "https://megaflix.name/",
     "X-Requested-With": "XMLHttpRequest"
 }
 
-# YouCine
-YCINE_API_BASE = "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1"
-YCINE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+# YouCine - Fontes (Mirrors)
+YCINE_MIRRORS = [
+    "https://ycineflix.tudo30.shop/wp-json/xui-pflix/v1",
+    "https://app.pobreflix2.site/wp-json/xui-pflix/v1"
+]
+YCINE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-# Cache Simples (10 minutos)
+# Cache Global
 cache = {"data": None, "time": 0}
 
 # ================= UTILITÁRIOS =================
@@ -32,86 +33,76 @@ def decode_b64(data):
     try:
         data += "=" * ((4 - len(data) % 4) % 4)
         return base64.b64decode(data).decode('utf-8')
-    except: return data
+    except: return "{}"
 
 # ================= LÓGICA MEGAFLIX =================
-def get_megaflix_channels():
+def get_megaflix():
     items = []
     try:
-        response = requests.post(f"{MEGAFLIX_API}?page=viewChannels", headers=MEGAFLIX_HEADERS, timeout=20)
-        if response.status_code == 200:
-            matches = re.findall(r'data-data="([^"]+)"', response.text)
-            for b64_json in matches:
-                try:
-                    data = json.loads(decode_b64(b64_json))
-                    cid = data.get("id")
-                    name = data.get("name") or data.get("titulo")
-                    img = data.get("background") or data.get("img")
-
-                    if cid and name:
-                        encoded_id = base64.b64encode(str(cid).encode()).decode()
-                        play_url = f"{request.host_url.rstrip('/')}/play?t=m&id={encoded_id}"
-                        items.append({
-                            "name": f"[MF] {name.strip()}",
-                            "url": play_url,
-                            "logo": img,
-                            "group": "MEGAFLIX TV"
-                        })
-                except: continue
-    except Exception as e:
-        print(f"Erro MegaFlix: {e}")
+        r = requests.post(f"{MEGAFLIX_API}?page=viewChannels", headers=MEGAFLIX_HEADERS, timeout=12)
+        matches = re.findall(r'data-data="([^"]+)"', r.text)
+        for b64 in matches:
+            try:
+                d = json.loads(decode_b64(b64))
+                cid = d.get("id")
+                name = d.get("name") or d.get("titulo")
+                if cid and name:
+                    eid = base64.b64encode(str(cid).encode()).decode()
+                    items.append({
+                        "name": f"[MF] {name.strip()}",
+                        "url": f"{request.host_url.rstrip('/')}/play?id={eid}",
+                        "logo": d.get("background") or d.get("img"),
+                        "group": "MEGAFLIX TV"
+                    })
+            except: continue
+    except: pass
     return items
 
 # ================= LÓGICA YOUCINE =================
-def get_ycine_channels():
-    all_items = []
-    try:
-        cat_res = requests.get(f"{YCINE_API_BASE}/channels/categories", headers=YCINE_HEADERS, timeout=10).json()
-        cat_map = {str(c["id"]): c["name"] for c in cat_res.get("data", [])}
+def get_ycine():
+    items = []
+    for api_base in YCINE_MIRRORS:
+        try:
+            # Pega categorias
+            c_res = requests.get(f"{api_base}/channels/categories", headers={"User-Agent": YCINE_UA}, timeout=8).json()
+            cat_map = {str(c["id"]): c["name"] for c in c_res.get("data", [])}
 
-        def fetch_page(p):
-            try:
-                url = f"{YCINE_API_BASE}/channels?per_page=100&page={p}"
-                res = requests.get(url, headers=YCINE_HEADERS, timeout=15).json()
-                return res.get("data", {}).get("items", [])
-            except: return []
+            # Pega primeira página de canais (100 itens)
+            res = requests.get(f"{api_base}/channels?per_page=100", headers={"User-Agent": YCINE_UA}, timeout=10).json()
+            raw = res.get("data", {}).get("items", [])
+            if not raw: continue # Tenta o próximo mirror se esse falhar
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            pages = executor.map(fetch_page, range(1, 11))
-            for items in pages:
-                for item in items:
-                    stream = f"https://speed.megafilmeshd9.com/midia/speed-1/{item['id']}.m3u8"
-                    group = cat_map.get(str(item.get("category_id")), "YOUCINE TV")
-                    all_items.append({
-                        "name": item["name"],
-                        "url": stream,
-                        "logo": item.get("thumbnail") or item.get("stream_icon"),
-                        "group": f"YOUCINE | {group.upper()}"
-                    })
-    except Exception as e:
-        print(f"Erro YouCine: {e}")
-    return all_items
+            for i in raw:
+                items.append({
+                    "name": f"[YC] {i['name']}",
+                    "url": f"https://speed.megafilmeshd9.com/midia/speed-1/{i['id']}.m3u8",
+                    "logo": i.get("thumbnail") or i.get("stream_icon"),
+                    "group": f"YOUCINE | {cat_map.get(str(i.get('category_id')), 'TV').upper()}"
+                })
+            if items: break # Sucesso, não precisa de outros mirrors
+        except: continue
+    return items
 
 # ================= ROTAS =================
 @app.route('/')
-def index():
-    return "<h1>M3U Server V21.0</h1><p>MegaFlix + YouCine</p><a href='/playlist.m3u'>Playlist</a>"
+def home():
+    return "<h1>Servidor M3U V23.0</h1><p>Status: ONLINE</p>"
 
 @app.route('/playlist.m3u')
 def playlist():
     global cache
-    now = time.time()
-    if cache["data"] and (now - cache["time"] < 600):
-        return Response(cache["data"], mimetype='application/x-mpegurl')
+    if cache["data"] and (time.time() - cache["time"] < 300): # Cache reduzido para 5 min
+        return Response(cache["data"], mimetype='text/plain')
 
+    # Canal fixo de teste para saber se o servidor está ativo
     m3u = "#EXTM3U\n"
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_mega = executor.submit(get_megaflix_channels)
-        f_ycine = executor.submit(get_ycine_channels)
-        all_items = f_mega.result() + f_ycine.result()
+    m3u += '#EXTINF:-1 tvg-id="status" group-title="-- INFO --",>> SERVIDOR ONLINE V23 <<\n'
+    m3u += 'http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4\n'
 
-    if not all_items:
-        return "#EXTM3U\n# Erro ao carregar canais"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_mf = executor.submit(get_megaflix)
+        f_yc = executor.submit(get_ycine)
+        all_items = f_mf.result() + f_yc.result()
 
     for item in all_items:
         tid = item["name"].lower().replace(" ", ".")
@@ -119,23 +110,21 @@ def playlist():
         m3u += f'{item["url"]}\n'
 
     cache["data"] = m3u
-    cache["time"] = now
-    return Response(m3u, mimetype='application/x-mpegurl')
+    cache["time"] = time.time()
+    return Response(m3u, mimetype='text/plain')
 
 @app.route('/play')
-def play_redirect():
-    t = request.args.get('t')
+def play():
     eid = request.args.get('id')
-    if not eid: return "Error", 400
+    if not eid: return "ID Error", 400
     cid = base64.b64decode(eid).decode()
     try:
-        token_url = f"https://app.megafrixapi.com/get_token_channel.php?channel={cid}"
-        res = requests.post(token_url, json={"id": 0, "type": "app", "headers": MEGAFLIX_HEADERS}, headers=MEGAFLIX_HEADERS, timeout=10).json()
+        t_url = f"https://app.megafrixapi.com/get_token_channel.php?channel={cid}"
+        res = requests.post(t_url, json={"id":0,"type":"app","headers":MEGAFLIX_HEADERS}, headers=MEGAFLIX_HEADERS, timeout=10).json()
         final = res.get("url") or res.get("stream")
         if final: return redirect(final)
     except: pass
-    return "Offline", 404
+    return "Stream Offline", 404
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
